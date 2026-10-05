@@ -2,7 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from ps2opl.iso import find_iso_files
+from ps2opl.iso import (
+    MediaType,
+    detect_media_type,
+    find_iso_files,
+)
 
 
 def test_find_iso_files(tmp_path: Path) -> None:
@@ -69,3 +73,32 @@ def test_find_iso_files_path_is_file(tmp_path: Path) -> None:
 
     with pytest.raises(NotADirectoryError):
         find_iso_files(file)
+        
+
+def test_detect_cd(tmp_path: Path) -> None:
+    iso = tmp_path / "game.iso"
+
+    with iso.open("wb") as file:
+        file.truncate(700 * 1024 * 1024)
+
+    result = detect_media_type(iso)
+
+    assert result == MediaType.CD
+
+
+def test_detect_dvd(tmp_path: Path) -> None:
+    iso = tmp_path / "game.iso"
+
+    with iso.open("wb") as file:
+        file.truncate(2 * 1024 * 1024 * 1024)
+
+    result = detect_media_type(iso)
+
+    assert result == MediaType.DVD
+
+
+def test_detect_media_file_not_found(tmp_path: Path) -> None:
+    iso = tmp_path / "missing.iso"
+
+    with pytest.raises(FileNotFoundError):
+        detect_media_type(iso)

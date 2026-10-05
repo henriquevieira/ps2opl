@@ -1,11 +1,18 @@
 import io
 import logging
+from enum import Enum
 from pathlib import Path
 
 import pycdlib
 
 logger = logging.getLogger("ps2opl.iso")
 
+class MediaType(str, Enum):
+    CD = "CD"
+    DVD = "DVD"
+    UNKNOWN = "UNKNOWN"
+    
+CD_MAX_SIZE = 900 * 1024 * 1024
 
 def find_iso_files(
     path: str | Path,
@@ -147,3 +154,54 @@ def read_system_cnf(iso_path: str | Path) -> str:
                 path,
                 exc_info=True,
             )
+            
+
+def detect_media_type(iso_path: str | Path) -> MediaType:
+    """
+    Detecta se uma imagem de PlayStation 2 deve ser tratada
+    como CD ou DVD pelo OPL.
+
+    A detecção utiliza o tamanho da imagem como heurística.
+
+    Args:
+        iso_path:
+            Caminho para a imagem ISO.
+
+    Returns:
+        MediaType.CD ou MediaType.DVD.
+
+    Raises:
+        FileNotFoundError:
+            Se a ISO não existir.
+
+        IsADirectoryError:
+            Se o caminho informado não for um arquivo.
+    """
+
+    path = Path(iso_path).expanduser()
+
+    if not path.exists():
+        raise FileNotFoundError(
+            f"ISO não encontrada: {path}"
+        )
+
+    if not path.is_file():
+        raise IsADirectoryError(
+            f"O caminho informado não é um arquivo: {path}"
+        )
+
+    size = path.stat().st_size
+
+    if size <= CD_MAX_SIZE:
+        media_type = MediaType.CD
+    else:
+        media_type = MediaType.DVD
+
+    logger.debug(
+        "Mídia detectada: path=%s size=%d media=%s",
+        path,
+        size,
+        media_type.value,
+    )
+
+    return media_type
