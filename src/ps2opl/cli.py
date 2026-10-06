@@ -30,6 +30,14 @@ from ps2opl.iso import (
 from ps2opl.logging_config import configure_logging
 from ps2opl.storage import inspect_opl_storage
 from ps2opl.system_cnf import parse_system_cnf
+from ps2opl.ul import (
+    ULInstallError,
+    create_ul_install_plan,
+    format_hex_record,
+    install_ul_parts,
+    read_ul_records,
+    register_ul_game,
+)
 
 app = typer.Typer(
     name="ps2opl",
@@ -304,6 +312,148 @@ def device(
             "individual files are subject to the 4 GiB "
             "limit.[/yellow]"
         )
+
+def install_ul_cli(
+    ul_plan,
+    storage,
+) -> None:
+    """
+    Instala e verifica as partes UL.
+
+    Nesta etapa, ul.cfg não é modificado.
+    """
+
+    console.print()
+    console.print(
+        "[bold]Installing UL/USBExtreme parts[/bold]"
+    )
+    console.print()
+
+    try:
+        with Progress(
+            TextColumn("{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            DownloadColumn(),
+            TransferSpeedColumn(),
+            TimeRemainingColumn(),
+            console=console,
+        ) as progress:
+
+            copy_task = progress.add_task(
+                "[blue]Splitting ISO",
+                total=ul_plan.file_size,
+            )
+
+            source_hash_task = progress.add_task(
+                "[cyan]Verifying source",
+                total=ul_plan.file_size,
+                visible=False,
+            )
+
+            parts_hash_task = progress.add_task(
+                "[cyan]Verifying UL parts",
+                total=ul_plan.file_size,
+                visible=False,
+            )
+
+            def update_copy(processed: int) -> None:
+                progress.update(
+                    copy_task,
+                    completed=processed,
+                )
+
+            def update_source_hash(
+                processed: int,
+            ) -> None:
+                progress.update(
+                    source_hash_task,
+                    visible=True,
+                    completed=processed,
+                )
+
+            def update_parts_hash(
+                processed: int,
+            ) -> None:
+                progress.update(
+                    parts_hash_task,
+                    visible=True,
+                    completed=processed,
+                )
+
+            parts = install_ul_parts(
+                ul_plan,
+                free_space=storage.free_space,
+                copy_progress_callback=update_copy,
+                source_hash_progress_callback=(
+                    update_source_hash
+                ),
+                parts_hash_progress_callback=(
+                    update_parts_hash
+                ),
+            )
+
+            progress.update(
+                copy_task,
+                completed=ul_plan.file_size,
+            )
+
+            progress.update(
+                source_hash_task,
+                completed=ul_plan.file_size,
+            )
+
+            progress.update(
+                parts_hash_task,
+                completed=ul_plan.file_size,
+            )
+
+    except KeyboardInterrupt:
+        console.print()
+        console.print(
+            "[yellow]"
+            "Installation interrupted by user."
+            "[/yellow]"
+        )
+        raise typer.Exit(code=130) from None
+
+    except ULInstallError as exc:
+        console.print()
+        console.print(
+            f"[red bold]UL installation failed:[/red bold] "
+            f"{exc}"
+        )
+        raise typer.Exit(code=1) from exc
+
+    except OSError as exc:
+        console.print()
+        console.print(
+            f"[red bold]I/O error:[/red bold] {exc}"
+        )
+        raise typer.Exit(code=1) from exc
+
+    console.print()
+    console.print(
+        "[green bold]"
+        "✓ UL parts installed and verified."
+        "[/green bold]"
+    )
+
+    console.print()
+
+    for part in parts:
+        console.print(
+            f"  [green]✓[/green] {part}"
+        )
+
+    console.print()
+
+    console.print(
+        "[yellow]"
+        "ul.cfg was not modified. "
+        "The game is not yet registered in OPL."
+        "[/yellow]"
+    )
         
 @app.command()
 def install(
@@ -393,7 +543,16 @@ def install(
             f"[bold]Destination:[/bold]      {plan.destination}"
         )
 
+    ul_plan = None
+
     if plan.requires_ul:
+        ul_plan = create_ul_install_plan(
+            source=plan.source,
+            storage_path=storage.path,
+            title=plan.title,
+            game_id=plan.game_id,
+            media_type=plan.media_type,
+        )
         console.print()
         console.print(
             "[yellow]The ISO exceeds the FAT32 file size limit.[/yellow]"
@@ -401,6 +560,42 @@ def install(
         console.print(
             "[yellow]Installation in UL/USBExtreme format will be required.[/yellow]"
         )
+        
+        if ul_plan is not None:
+            console.print(
+                f"[bold]Título UL:[/bold]     "
+                f"{ul_plan.title}"
+            )
+
+            console.print(
+                f"[bold]CRC32 UL:[/bold]      "
+                f"{ul_plan.crc32:08X}"
+            )
+
+            console.print(
+                f"[bold]Partes:[/bold]        "
+                f"{ul_plan.part_count}"
+            )
+
+            console.print(
+                f"[bold]Tamanho/parte:[/bold] "
+                f"{format_size(ul_plan.part_size)}"
+            )
+
+            console.print(
+                f"[bold]ul.cfg:[/bold]        "
+                f"{ul_plan.cfg_path}"
+            )
+
+            console.print()
+            console.print(
+                "[bold]Arquivos que serão criados:[/bold]"
+            )
+
+            for part_path in ul_plan.part_paths:
+                console.print(
+                    f"  {part_path}"
+                )
 
     console.print()
 
@@ -410,24 +605,31 @@ def install(
         )
         return
 
-    if plan.method == InstallMethod.UL:
-        console.print(
-            "[yellow]The UL/USBExtreme installation is not yet "
-            "implemented.[/yellow]"
-        )
-        raise typer.Exit(code=2)
-    
-        console.print()
-
     confirmed = typer.confirm(
-        "Do you want to start the installation?"
-    )
+    "Do you want to start the installation?"
+)
 
     if not confirmed:
         console.print(
             "[yellow]Canceled installation.[/yellow]"
         )
         raise typer.Exit()
+
+    if plan.method == InstallMethod.UL:
+        if ul_plan is None:
+            console.print(
+                "[red]"
+                "Internal error: UL plan was not created."
+                "[/red]"
+            )
+            raise typer.Exit(code=1)
+
+        install_ul_cli(
+            ul_plan=ul_plan,
+            storage=storage,
+        )
+
+        return
     
     console.print()
 
@@ -472,19 +674,7 @@ def install(
                     completed=processed,
                 )
 
-                progress.update(
-                    source_hash_task,
-                    visible=True,
-                    completed=processed,
-                )
-
             def update_destination_hash(processed: int) -> None:
-                progress.update(
-                    destination_hash_task,
-                    visible=True,
-                    completed=processed,
-                )
-
                 progress.update(
                     destination_hash_task,
                     visible=True,
@@ -527,4 +717,245 @@ def install(
 
     console.print(
         f"[bold]Destination:[/bold] {destination}"
+    )
+    
+@app.command("ul-inspect")
+def ul_inspect(
+    device: Annotated[
+        Path,
+        typer.Argument(
+            help="Ponto de montagem do dispositivo OPL.",
+        ),
+    ],
+) -> None:
+    """
+    Inspeciona o arquivo ul.cfg sem modificá-lo.
+    """
+
+    cfg_path = device / "ul.cfg"
+
+    try:
+        records = read_ul_records(cfg_path)
+
+    except (
+        FileNotFoundError,
+        IsADirectoryError,
+        ValueError,
+    ) as exc:
+        logger.error("%s", exc)
+        raise typer.Exit(code=1) from exc
+
+    console.print()
+    console.print("[bold]UL/USBExtreme configuration[/bold]")
+    console.print()
+
+    console.print(
+        f"[bold]Arquivo:[/bold]  {cfg_path}"
+    )
+
+    console.print(
+        f"[bold]Registros:[/bold] {len(records)}"
+    )
+
+    console.print()
+
+    if not records:
+        console.print(
+            "[yellow]Nenhum jogo UL instalado.[/yellow]"
+        )
+        return
+
+    for index, record in enumerate(
+        records,
+        start=1,
+    ):
+        console.print(
+            f"[bold]Registro {index}[/bold]"
+        )
+
+        console.print(
+            format_hex_record(record)
+        )
+
+        console.print()
+        
+@app.command("ul-register")
+def ul_register(
+    iso: Annotated[
+        Path,
+        typer.Argument(
+            help="ISO original corresponding to the installed UL parts.",
+        ),
+    ],
+    device: Annotated[
+        Path,
+        typer.Argument(
+            help="OPL device mount point.",
+        ),
+    ],
+) -> None:
+    """
+    Registers existing UL parts in ul.cfg.
+
+    This command does not copy or modify the UL parts.
+    """
+
+    logger.info(
+        "Preparing UL registration: %s",
+        iso,
+    )
+
+    try:
+        storage = inspect_opl_storage(device)
+
+        if not storage.is_valid:
+            console.print(
+                "[red]"
+                "The destination does not have a valid "
+                "OPL structure."
+                "[/red]"
+            )
+            raise typer.Exit(code=1)
+
+        plan = create_install_plan(
+            iso,
+            storage,
+        )
+
+        if plan.method != InstallMethod.UL:
+            console.print(
+                "[red]"
+                "This ISO does not require UL installation "
+                "on this device."
+                "[/red]"
+            )
+            raise typer.Exit(code=1)
+
+        ul_plan = create_ul_install_plan(
+            source=plan.source,
+            storage_path=storage.path,
+            title=plan.title,
+            game_id=plan.game_id,
+            media_type=plan.media_type,
+        )
+
+    except (
+        FileNotFoundError,
+        IsADirectoryError,
+        ValueError,
+    ) as exc:
+        logger.error("%s", exc)
+        raise typer.Exit(code=1) from exc
+
+    console.print()
+    console.print(
+        "[bold]UL/USBExtreme registration[/bold]"
+    )
+    console.print()
+
+    console.print(
+        f"[bold]Game ID:[/bold]      "
+        f"{ul_plan.game_id}"
+    )
+
+    console.print(
+        f"[bold]Title:[/bold]        "
+        f"{ul_plan.title}"
+    )
+
+    console.print(
+        f"[bold]Media Type:[/bold]   "
+        f"{ul_plan.media_type.value}"
+    )
+
+    console.print(
+        f"[bold]Parts:[/bold]        "
+        f"{ul_plan.part_count}"
+    )
+
+    console.print(
+        f"[bold]CRC32 UL:[/bold]     "
+        f"{ul_plan.crc32:08X}"
+    )
+
+    console.print(
+        f"[bold]ul.cfg:[/bold]       "
+        f"{ul_plan.cfg_path}"
+    )
+
+    console.print()
+    console.print(
+        "[bold]Existing UL parts:[/bold]"
+    )
+
+    missing = False
+
+    for part_path in ul_plan.part_paths:
+        if part_path.is_file():
+            console.print(
+                f"  [green]✓[/green] "
+                f"{part_path.name} "
+                f"({format_size(part_path.stat().st_size)})"
+            )
+        else:
+            missing = True
+            console.print(
+                f"  [red]✗[/red] "
+                f"{part_path.name}"
+            )
+
+    if missing:
+        console.print()
+        console.print(
+            "[red bold]"
+            "Registration aborted: "
+            "one or more UL parts are missing."
+            "[/red bold]"
+        )
+        raise typer.Exit(code=1)
+
+    console.print()
+
+    confirmed = typer.confirm(
+        "Register this game in ul.cfg?"
+    )
+
+    if not confirmed:
+        console.print(
+            "[yellow]Registration canceled.[/yellow]"
+        )
+        raise typer.Exit()
+
+    try:
+        cfg_path = register_ul_game(
+            ul_plan
+        )
+
+    except ULInstallError as exc:
+        console.print()
+        console.print(
+            f"[red bold]"
+            f"UL registration failed:"
+            f"[/red bold] {exc}"
+        )
+        raise typer.Exit(code=1) from exc
+
+    except OSError as exc:
+        console.print()
+        console.print(
+            f"[red bold]"
+            f"I/O error:"
+            f"[/red bold] {exc}"
+        )
+        raise typer.Exit(code=1) from exc
+
+    console.print()
+    console.print(
+        "[green bold]"
+        "✓ Game registered successfully."
+        "[/green bold]"
+    )
+
+    console.print(
+        f"[bold]ul.cfg:[/bold] {cfg_path}"
     )
