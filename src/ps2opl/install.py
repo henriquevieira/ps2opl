@@ -11,11 +11,7 @@ from ps2opl.iso import (
     detect_media_type,
     read_system_cnf,
 )
-from ps2opl.naming import (
-    build_opl_filename,
-    get_game_title,
-    sanitize_opl_title,
-)
+from ps2opl.naming import build_opl_filename
 from ps2opl.storage import OPLStorage
 from ps2opl.system_cnf import parse_system_cnf
 
@@ -113,14 +109,12 @@ def create_install_plan(
         method.value,
         destination,
     )
-    
-    title = sanitize_opl_title(get_game_title(source))
 
     return InstallPlan(
         source=source,
         destination=destination,
         game_id=config.game_id,
-        title=title,
+        title=source.stem,
         media_type=media_type,
         method=method,
         file_size=size,
